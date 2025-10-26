@@ -214,12 +214,15 @@ def run_task():
 
         # Call Vertex AI
         model = GenerativeModel(VIDEO_MODEL_ID)
-        config = {
-            "aspect_ratio": aspect_ratio,
-            "generation_length_secs": duration,
+        generation_params = {
+            "durationSeconds": duration, # Use camelCase matching REST API
+            "aspectRatio": aspect_ratio  # Use camelCase matching REST API
         }
-        logging.info(f"Generating video for job {job_id} with prompt: '{prompt}'")
-        video_response = model.generate_content([prompt], generation_config=config)
+        logging.info(f"Calling Veo model with params: {generation_params}") # Log parameters
+        video_response = model.generate_content(
+            [prompt],
+            generation_config=generation_params
+        )
 
         # This assumes the first result is the one we want and it is base64 encoded
         video_bytes = base64.b64decode(video_response.candidates[0].content.parts[0].video)
