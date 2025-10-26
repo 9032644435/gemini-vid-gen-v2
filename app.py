@@ -41,13 +41,22 @@ except Exception as e:
 
 # --- Helper Function for Dynamic URL ---
 def get_cloud_run_url():
-    """Gets the public URL of the currently running Cloud Run service."""
+    """
+    Gets the public URL of the currently running Cloud Run service.
+    Prioritizes SERVICE_URL env var, then falls back to metadata server.
+    """
+    service_url = os.getenv('SERVICE_URL')
+    if service_url:
+        logging.info(f"Using service URL from environment variable: {service_url}")
+        return service_url if service_url.endswith('/') else service_url + '/'
+
+    logging.info("SERVICE_URL not set, attempting to fetch from metadata server.")
     try:
         metadata_server_url = "http://metadata.google.internal/computeMetadata/v1/instance/attributes/run_url"
         metadata_response = requests.get(metadata_server_url, headers={"Metadata-Flavor": "Google"})
         metadata_response.raise_for_status()
         service_url = metadata_response.text
-        logging.info(f"Detected Cloud Run service URL: {service_url}")
+        logging.info(f"Detected Cloud Run service URL from metadata: {service_url}")
         return service_url if service_url.endswith('/') else service_url + '/'
     except requests.exceptions.RequestException as e:
         logging.error(f"Could not fetch Cloud Run URL from metadata server: {e}")
