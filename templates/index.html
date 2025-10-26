@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Video Generation</title>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+</head>
+<body>
+    <h1>Video Generation</h1>
+    <form id="video-form">
+        <label for="prompt">Prompt:</label><br>
+        <input type="text" id="prompt" name="prompt" style="width: 500px;"><br><br>
+        <label for="aspect_ratio">Aspect Ratio:</label><br>
+        <select id="aspect_ratio" name="aspect_ratio">
+            <option value="16:9">16:9</option>
+            <option value="9:16">9:16</option>
+        </select><br><br>
+        <input type="submit" value="Generate Video">
+    </form>
+    <div id="status"></div>
+
+    <script>
+        $(document).ready(function() {
+            $('#video-form').submit(function(e) {
+                e.preventDefault();
+                var prompt = $('#prompt').val();
+                var aspect_ratio = $('#aspect_ratio').val();
+                $('#status').html('Job submitted. Job ID: pending...');
+
+                $.ajax({
+                    type: 'POST',
+                    url: '/api/generate-video',
+                    data: JSON.stringify({ prompt: prompt, aspect_ratio: aspect_ratio }),
+                    contentType: 'application/json',
+                    success: function(data) {
+                        var job_id = data.job_id;
+                        $('#status').html('Job ID: ' + job_id + ' - Status: pending');
+                        pollStatus(job_id);
+                    },
+                    error: function(data) {
+                        $('#status').html('Error: ' + data.responseJSON.error);
+                    }
+                });
+            });
+
+            function pollStatus(job_id) {
+                var interval = setInterval(function() {
+                    $.get('/api/check-status/' + job_id, function(data) {
+                        $('#status').html('Job ID: ' + job_id + ' - Status: ' + data.status);
+                        if (data.status === 'complete') {
+                            clearInterval(interval);
+                            $('#status').append('<br><a href="' + data.video_url + '" target="_blank">View Video</a>');
+                        } else if (data.status === 'failed') {
+                            clearInterval(interval);
+                            $('#status').append('<br>Error: ' + data.error);
+                        }
+                    });
+                }, 10000);
+            }
+        });
+    </script>
+</body>
+</html>

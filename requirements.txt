@@ -1,0 +1,7 @@
+Flask
+google-cloud-firestore
+google-cloud-tasks
+google-cloud-aiplatform
+google-cloud-storage
+requests
+python-dotenv
