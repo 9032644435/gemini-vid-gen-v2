@@ -5,5 +5,5 @@ google-cloud-aiplatform
 google-cloud-storage
 requests
 python-dotenv
-gunicorn
+gunicorn==22.0.0
 google-auth
