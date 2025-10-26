@@ -82,15 +82,26 @@ def generate_video():
         data = request.get_json()
         prompt = data.get('prompt')
         aspect_ratio = data.get('aspect_ratio')
+        duration = data.get('duration')
+        num_videos = data.get('num_videos', 1)
 
-        if not prompt or not aspect_ratio:
-            return jsonify({'error': 'Missing prompt or aspect_ratio'}), 400
+        if not all([prompt, aspect_ratio, duration]):
+            return jsonify({'error': 'Missing required fields: prompt, aspect_ratio, or duration'}), 400
+
+        if not isinstance(duration, int) or duration <= 0:
+            return jsonify({'error': 'Duration must be a positive integer.'}), 400
+
+        if not isinstance(num_videos, int) or not (1 <= num_videos <= 4):
+            return jsonify({'error': 'Number of videos must be an integer between 1 and 4.'}), 400
+
 
         job_id = str(uuid.uuid4())
         doc_ref = db.collection(FIRESTORE_COLLECTION).document(job_id)
         doc_ref.set({
             'prompt': prompt,
             'aspect_ratio': aspect_ratio,
+            'duration': duration,
+            'num_videos': num_videos,
             'status': 'pending',
             'job_id': job_id,
             'created_at': firestore.SERVER_TIMESTAMP
@@ -109,7 +120,8 @@ def generate_video():
             'job_id': job_id,
             'prompt': prompt,
             'aspect_ratio': aspect_ratio,
-            'duration': 10
+            'duration': duration,
+            'num_videos': num_videos
         }
 
         task = {
@@ -133,12 +145,13 @@ def generate_video():
         return jsonify({'job_id': job_id, 'status': 'pending'}), 202
 
     except Exception as e:
-        logging.exception(f"Error during task creation for job {job_id if 'job_id' in locals() else 'unknown'}: {e}")
-        if 'job_id' in locals() and 'doc_ref' in locals():
+        job_id_local = locals().get('job_id', 'unknown')
+        logging.exception(f"Error during task creation for job {job_id_local}: {e}")
+        if 'doc_ref' in locals():
             try:
                 doc_ref.update({'status': 'failed', 'error': f'Task creation failed: {str(e)}'})
             except Exception as db_e:
-                logging.error(f"Failed to update Firestore status to failed for job {job_id}: {db_e}")
+                logging.error(f"Failed to update Firestore status to failed for job {job_id_local}: {db_e}")
         return jsonify({'error': f'Failed to create generation task: {str(e)}'}), 500
 
 @app.route('/api/check-status/<job_id>')
@@ -197,8 +210,9 @@ def run_task():
         prompt = data.get('prompt')
         aspect_ratio = data.get('aspect_ratio')
         duration = data.get('duration')
+        num_videos = data.get('num_videos')
 
-        if not all([job_id, prompt, aspect_ratio, duration]):
+        if not all([job_id, prompt, aspect_ratio, duration, num_videos]):
             logging.error(f"Missing required data in task payload for job {job_id}")
             return "Bad Request: Missing data", 400
 
@@ -215,16 +229,22 @@ def run_task():
         # Call Vertex AI
         model = GenerativeModel(VIDEO_MODEL_ID)
         generation_params = {
-            "durationSeconds": duration, # Use camelCase matching REST API
-            "aspectRatio": aspect_ratio  # Use camelCase matching REST API
+            "durationSeconds": duration,
+            "aspectRatio": aspect_ratio,
+            "number_of_videos": num_videos
         }
-        logging.info(f"Calling Veo model with params: {generation_params}") # Log parameters
+
+        logging.info(f"Calling Veo model for job {job_id} with params: {generation_params}")
         video_response = model.generate_content(
             [prompt],
             generation_config=generation_params
         )
 
-        # This assumes the first result is the one we want and it is base64 encoded
+        # Handle Result
+        # TODO: Handle multiple video results if present
+        if len(video_response.candidates) > 1:
+            logging.warning(f"Job {job_id} generated {len(video_response.candidates)} videos, but only processing the first one.")
+
         video_bytes = base64.b64decode(video_response.candidates[0].content.parts[0].video)
 
         # Upload to GCS
