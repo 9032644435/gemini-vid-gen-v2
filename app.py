@@ -8,7 +8,7 @@ from google.cloud import tasks_v2
 PROJECT_ID = "gemini-vid-gen-v2"
 REGION = "us-central1"
 FIRESTORE_COLLECTION = "video-generations"
-TASK_QUEUE = "video-generation-queue"
+TASK_QUEUE = "video-gen-queue"
 TASK_SPN = "video-generation-sa@gemini-vid-gen-v2.iam.gserviceaccount.com"
 CLOUD_RUN_URL = "https://video-generation-processor-s65g52q7ya-uc.a.run.app"
 BUCKET_NAME = "gemini-vid-gen-v2-output"
