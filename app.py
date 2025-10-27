@@ -12,7 +12,8 @@ import time # For placeholder delay/simulated work
 from google.oauth2 import id_token
 from google.auth.transport import requests as auth_requests
 # Use the specific video classes
-from vertexai.vision_models import VideoGenerationModel, GenerateVideosConfig # Correct Video Classes
+from vertexai.preview.vision_models import VideoGenerationModel, GenerateVideosConfig # Try preview path again
+#from vertexai.vision_models import VideoGenerationModel, GenerateVideosConfig # Correct Video Classes
 from google.cloud import aiplatform, storage
 import requests
 
