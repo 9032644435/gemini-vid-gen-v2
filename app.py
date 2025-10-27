@@ -47,31 +47,25 @@ except Exception as e:
 
 # --- Helper Function for Dynamic URL ---
 def get_cloud_run_url():
-    """
-    Gets the public URL of the currently running Cloud Run service.
-    Prioritizes SERVICE_URL env var, then falls back to metadata server.
-    """
     service_url = os.getenv('SERVICE_URL')
     if service_url:
         logging.info(f"Using service URL from environment variable: {service_url}")
-        # Ensure URL always ends with a slash
         return service_url if service_url.endswith('/') else service_url + '/'
 
     logging.warning("SERVICE_URL env var not found, attempting to fetch from metadata server.")
     try:
         metadata_server_url = "http://metadata.google.internal/computeMetadata/v1/instance/attributes/run_url"
         metadata_response = requests.get(metadata_server_url, headers={"Metadata-Flavor": "Google"}, timeout=5)
-        metadata_response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        metadata_response.raise_for_status()
         service_url = metadata_response.text
         logging.info(f"Detected Cloud Run service URL from metadata: {service_url}")
         return service_url if service_url.endswith('/') else service_url + '/'
     except requests.exceptions.RequestException as e:
         logging.error(f"Could not fetch Cloud Run URL from metadata server: {e}")
-        return None # Return None to indicate failure
+        return None
 
 # --- Helper for getting Auth Token ---
 def get_auth_token():
-    """Gets an auth token for the default service account."""
     try:
         credentials, project_id_unused = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
         auth_req = google.auth.transport.requests.Request()
@@ -88,12 +82,6 @@ def index():
 
 @app.route('/api/generate-video', methods=['POST'])
 def generate_video():
-    """
-    Handles video generation requests.
-    - Creates a job ID and Firestore document.
-    - Creates a Cloud Task with OIDC auth to trigger the video generation process.
-    - Returns the job ID to the client.
-    """
     if not db or not tasks_client:
          logging.error("Clients not initialized.")
          return jsonify({'error': 'Server config error'}), 500
@@ -123,7 +111,7 @@ def generate_video():
 
         job_id = str(uuid.uuid4())
         doc_ref = db.collection(FIRESTORE_COLLECTION).document(job_id)
-        storage_uri = f"gs://{BUCKET_NAME}/{job_id}/" # Needs trailing slash
+        storage_uri = f"gs://{BUCKET_NAME}/{job_id}/"
 
         doc_ref.set({
             'prompt': prompt, 'aspect_ratio': aspect_ratio, 'duration': duration,
@@ -148,20 +136,14 @@ def generate_video():
             'num_videos': num_videos,
             'storageUri': storage_uri
         }
-
-        # --- THIS IS THE FIX ---
-        # The OIDC audience must NOT have the trailing slash.
+        
         oidc_audience = target_url.rstrip('/') 
-        # --- END FIX ---
 
         task = {
             'http_request': {
                 'http_method': tasks_v2.HttpMethod.POST,
                 'url': worker_endpoint,
-                'oidc_token': { 
-                    'service_account_email': TASK_SPN, 
-                    'audience': oidc_audience # Use the stripped URL
-                },
+                'oidc_token': { 'service_account_email': TASK_SPN, 'audience': oidc_audience },
                 'headers': {'Content-type': 'application/json'},
                 'body': json.dumps(task_payload).encode('utf-8')
             }
@@ -188,14 +170,11 @@ def generate_video():
 
 @app.route('/api/check-status/<job_id>')
 def check_status(job_id):
-    """
-    Checks the status. If 'processing_ai', polls the AI operation.
-    """
     if not db:
         logging.error("DB client not available.")
         return jsonify({'error': 'Server configuration error'}), 500
 
-    doc_ref = None # Initialize outside try
+    doc_ref = None
     try:
         doc_ref = db.collection(FIRESTORE_COLLECTION).document(job_id)
         doc = doc_ref.get()
@@ -212,7 +191,7 @@ def check_status(job_id):
             token = get_auth_token()
             if not token:
                 logging.error(f"Could not get auth token to poll operation for job {job_id}")
-                return jsonify(job_data), 200 # Return current data, error logged
+                return jsonify(job_data), 200
 
             headers = { "Authorization": f"Bearer {token}", "Content-Type": "application/json" }
             poll_payload = {"operationName": operation_name}
@@ -230,8 +209,16 @@ def check_status(job_id):
                     video_urls = []
 
                     if not video_outputs:
-                         logging.error(f"AI op done but no 'videos' in response for job {job_id}. Response: {ai_response_data}")
-                         raise Exception("AI finished but returned no video outputs.")
+                         # This might be an RAI filter hit
+                         rai_filtered = ai_response_data.get('raiMediaFilteredCount', 0)
+                         rai_reasons = ai_response_data.get('raiMediaFilteredReasons', [])
+                         if rai_filtered > 0:
+                             error_msg = f"AI filter blocked prompt. Reason: {rai_reasons}"
+                             logging.warning(f"RAI filter hit for job {job_id}: {rai_reasons}")
+                             raise Exception(error_msg)
+                         else:
+                             logging.error(f"AI op done but no 'videos' in response for job {job_id}. Response: {ai_response_data}")
+                             raise Exception("AI finished but returned no video outputs.")
 
                     if not storage_client:
                         logging.error("Storage client not available for processing GCS URIs.")
@@ -263,22 +250,35 @@ def check_status(job_id):
                     if not video_urls:
                          raise Exception("AI finished but no valid video URLs could be constructed.")
 
+                    # Update Firestore
                     final_status_update = { 'status': 'complete', 'updated_at': firestore.SERVER_TIMESTAMP }
                     if len(video_urls) == 1: final_status_update['video_url'] = video_urls[0]
                     else: final_status_update['video_urls'] = video_urls
                     doc_ref.update(final_status_update)
                     logging.info(f"Job {job_id} successfully completed.")
-                    job_data.update(final_status_update)
-                    return jsonify(job_data), 200
+                    
+                    # --- THIS IS THE FIX ---
+                    # Update local job_data *without* the Sentinel object
+                    job_data['status'] = 'complete'
+                    if 'video_url' in final_status_update:
+                        job_data['video_url'] = final_status_update['video_url']
+                    if 'video_urls' in final_status_update:
+                        job_data['video_urls'] = final_status_update['video_urls']
+                    # We can't return the Sentinel, so we'll just return the updated job_data
+                    # --- END FIX ---
+                    
+                    return jsonify(job_data), 200 # Return the modified job_data
                 else:
+                    # Operation still running
                     logging.info(f"AI operation still running for job {job_id}.")
-                    return jsonify(job_data), 200
+                    return jsonify(job_data), 200 # Return current 'processing_ai' status
 
             except requests.exceptions.RequestException as poll_err:
                  logging.error(f"Failed to poll AI operation status for job {job_id}: {poll_err}. Response: {poll_err.response.text if poll_err.response else 'No response'}")
                  return jsonify(job_data), 200
 
         else:
+            # Status is 'pending', 'complete', or 'failed'
             return jsonify(job_data), 200
 
     except Exception as e:
@@ -351,8 +351,8 @@ def run_task():
             "durationSeconds": duration,
             "aspectRatio": aspect_ratio,
             "sampleCount": num_videos,
-            "storageUri": storage_uri, # Tell API where to save output
-            "generateAudio": True # Explicitly request audio
+            "storageUri": storage_uri,
+            "generateAudio": True 
         }
         request_body = {"instances": instances, "parameters": parameters}
 
@@ -370,7 +370,7 @@ def run_task():
         logging.info(f"AI operation started for job {job_id}: {operation_name}")
 
         doc_ref.update({
-            'status': 'processing_ai', # Status indicates polling is needed
+            'status': 'processing_ai',
             'operation_name': operation_name,
             'updated_at': firestore.SERVER_TIMESTAMP
         })
