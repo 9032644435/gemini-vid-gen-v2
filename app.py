@@ -124,14 +124,32 @@ def generate_video():
              return jsonify({'error': 'Server config error: No service URL'}), 500
 
         worker_endpoint = target_url + 'api/run-task'
-        task_payload = {
-            'job_id': job_id, 'prompt': prompt, 'aspect_ratio': aspect_ratio,
-            'duration': duration, 'num_videos': num_videos
-        }
-        task = {
-            'http_request': {
-                'http_method': tasks_v2.HttpMethod.POST,
-                'url': worker_endpoint,
-                'oidc_token': {
-                    'service_account_email': TASK_SPN,
-                    'audience': target_url # Root URL is
+        # ... inside generate_video function ...
+
+    task_payload = {
+        'job_id': job_id,
+        'prompt': prompt,
+        'aspect_ratio': aspect_ratio,
+        'duration': duration,
+        'num_videos': num_videos
+    }
+
+    task = { # <--- Main task dictionary starts here (line ~131)
+        'http_request': { # <--- http_request dictionary starts here (line ~132)
+            'http_method': tasks_v2.HttpMethod.POST,
+            'url': worker_endpoint,
+            'oidc_token': { # <--- oidc_token dictionary starts here (line ~135)
+                'service_account_email': TASK_SPN,
+                'audience': target_url # Root URL is the audience
+            }, # <--- This closes the oidc_token dictionary (line ~138)
+            'headers': {'Content-type': 'application/json'},
+            'body': json.dumps(task_payload).encode('utf-8')
+        } # <--- This closes the http_request dictionary (line ~146/147)
+        # Optional: Add dispatch_deadline or other task settings here if needed
+    } # <--- THIS CLOSING BRACE is needed to close the main task dictionary
+
+    logging.info(f"Creating task for job {job_id} targeting {worker_endpoint}")
+    # ... rest of the function ...
+            
+        
+    
