@@ -108,17 +108,16 @@ def generate_video():
         duration = data.get('duration')
         num_videos = data.get('num_videos', 1)
 
-        # Validation
+        # Validation (keep as before)
         if not prompt: return jsonify({'error': 'Missing prompt'}), 400
         if aspect_ratio not in ['16:9', '9:16']: return jsonify({'error': 'Invalid aspect_ratio'}), 400
         try:
             duration = int(duration)
-            # Valid durations for Veo 3.1
-            if duration not in [4, 6, 8, 10]: raise ValueError("Duration must be 4, 6, 8, or 10")
+            if not (1 <= duration <= 10): raise ValueError("Duration invalid")
         except: return jsonify({'error': 'Invalid duration.'}), 400
         try:
              num_videos = int(num_videos)
-             if not (1 <= num_videos <= 4): raise ValueError("Num videos must be 1-4")
+             if not (1 <= num_videos <= 4): raise ValueError("Num videos invalid")
         except: return jsonify({'error': 'Invalid num_videos.'}), 400
 
         job_id = str(uuid.uuid4())
@@ -392,4 +391,5 @@ def run_task():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() in ['true', '1', 'yes']
-    app.run(debug=debug=debug_mode, host='0.0.0.0', port=port)
+    # FIX: Removed duplicate 'debug=' keyword
+    app.run(debug=debug_mode, host='0.0.0.0', port=port)
