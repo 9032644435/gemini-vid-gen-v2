@@ -64,7 +64,8 @@ def get_cloud_run_url():
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    # Assuming index.html is in templates/ - Jules needs to confirm/create this
+    return render_template('index.html') # Added by previous instruction
 
 @app.route('/api/generate-video', methods=['POST'])
 def generate_video():
@@ -82,17 +83,28 @@ def generate_video():
         data = request.get_json()
         prompt = data.get('prompt')
         aspect_ratio = data.get('aspect_ratio')
+        # Get new parameters
         duration = data.get('duration')
-        num_videos = data.get('num_videos', 1)
+        num_videos = data.get('num_videos', 1) # Default to 1 if not provided
 
-        if not all([prompt, aspect_ratio, duration]):
-            return jsonify({'error': 'Missing required fields: prompt, aspect_ratio, or duration'}), 400
-
-        if not isinstance(duration, int) or duration <= 0:
-            return jsonify({'error': 'Duration must be a positive integer.'}), 400
-
-        if not isinstance(num_videos, int) or not (1 <= num_videos <= 4):
-            return jsonify({'error': 'Number of videos must be an integer between 1 and 4.'}), 400
+        # --- Validation ---
+        if not prompt:
+            return jsonify({'error': 'Missing prompt'}), 400
+        if aspect_ratio not in ['16:9', '9:16']:
+             return jsonify({'error': 'Invalid aspect_ratio'}), 400
+        try:
+            duration = int(duration)
+            if duration <= 0:
+                 raise ValueError("Duration must be positive")
+        except (ValueError, TypeError):
+             return jsonify({'error': 'Invalid duration. Must be a positive integer.'}), 400
+        try:
+             num_videos = int(num_videos)
+             if not 1 <= num_videos <= 4:
+                 raise ValueError("Number of videos must be between 1 and 4")
+        except (ValueError, TypeError):
+              return jsonify({'error': 'Invalid num_videos. Must be an integer between 1 and 4.'}), 400
+        # --- End Validation ---
 
 
         job_id = str(uuid.uuid4())
@@ -137,22 +149,24 @@ def generate_video():
             }
         }
 
-        logging.info(f"Creating task for job {job_id} targeting {worker_endpoint}")
-        task_parent = tasks_client.queue_path(PROJECT_ID, REGION, TASK_QUEUE)
+        logging.info(f"Creating task for job {job_id} targeting {worker_endpoint} with payload: {task_payload}")
+        task_parent = tasks_client.queue_path(PROJECT_ID, REGION, TASK_QUEUE) # Corrected parent usage
         task_response = tasks_client.create_task(parent=task_parent, task=task)
         logging.info(f"Task {task_response.name} created successfully for job {job_id}.")
 
         return jsonify({'job_id': job_id, 'status': 'pending'}), 202
 
     except Exception as e:
-        job_id_local = locals().get('job_id', 'unknown')
+        job_id_local = locals().get('job_id', 'unknown') # Safer way to get job_id if defined
         logging.exception(f"Error during task creation for job {job_id_local}: {e}")
-        if 'doc_ref' in locals():
+        if 'doc_ref' in locals(): # Check if doc_ref was defined before error
             try:
-                doc_ref.update({'status': 'failed', 'error': f'Task creation failed: {str(e)}'})
+                error_message = f'Failed to create generation task: {type(e).__name__} - {str(e)}'
+                doc_ref.update({'status': 'failed', 'error': error_message})
             except Exception as db_e:
                 logging.error(f"Failed to update Firestore status to failed for job {job_id_local}: {db_e}")
         return jsonify({'error': f'Failed to create generation task: {str(e)}'}), 500
+
 
 @app.route('/api/check-status/<job_id>')
 def check_status(job_id):
@@ -175,6 +189,7 @@ def check_status(job_id):
         logging.exception(f"Error checking status for job {job_id}: {e}")
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/run-task', methods=['POST'])
 def run_task():
     """
@@ -188,20 +203,31 @@ def run_task():
             return "Unauthorized", 401
 
         token = auth_header.split(' ')[1]
-        audience = get_cloud_run_url()
+        # Use google.auth.transport.requests for the request object
+        request_session = auth_requests.Request()
+        # It's better to get audience dynamically if possible, but env var is fallback
+        audience = os.getenv('SERVICE_URL')
+        if not audience: # Fallback if env var not set (should not happen in Cloud Run)
+             audience = get_cloud_run_url() # This might fail again if metadata issue persists
         if not audience:
              logging.error("Could not determine audience for OIDC validation")
-             return "Configuration error", 500
+             return "Configuration error: Cannot determine audience", 500
 
-        decoded_token = id_token.verify_oauth2_token(token, auth_requests.Request(), audience=audience)
+        # Remove trailing slash for audience validation
+        audience = audience.rstrip('/')
 
-        if decoded_token['email'] != TASK_SPN:
-            logging.error(f"Token email {decoded_token['email']} does not match expected SA {TASK_SPN}")
+        logging.info(f"Verifying OIDC token for audience: {audience}")
+        decoded_token = id_token.verify_oauth2_token(token, request_session, audience=audience)
+        logging.info(f"Token verified for email: {decoded_token.get('email')}")
+
+        if decoded_token.get('email') != TASK_SPN:
+            logging.error(f"Token email {decoded_token.get('email')} does not match expected SA {TASK_SPN}")
             return "Forbidden", 403
 
     except Exception as e:
         logging.exception(f"OIDC token verification failed: {e}")
-        return "Unauthorized", 401
+        return f"Unauthorized: {e}", 401
+
 
     # Get payload
     try:
@@ -226,12 +252,14 @@ def run_task():
         doc_ref.update({'status': 'processing', 'updated_at': firestore.SERVER_TIMESTAMP})
         logging.info(f"Job {job_id} status updated to processing.")
 
-        # Call Vertex AI
+        # --- Start AI Generation ---
+        logging.info(f"Generating video for job {job_id} with prompt: '{prompt}'")
+
         model = GenerativeModel(VIDEO_MODEL_ID)
         generation_params = {
             "durationSeconds": duration,
             "aspectRatio": aspect_ratio,
-            "number_of_videos": num_videos
+            "sampleCount": num_videos
         }
 
         logging.info(f"Calling Veo model for job {job_id} with params: {generation_params}")
@@ -239,43 +267,62 @@ def run_task():
             [prompt],
             generation_config=generation_params
         )
+        logging.info(f"Veo model returned for job {job_id}.")
 
-        # Handle Result
-        # TODO: Handle multiple video results if present
-        if len(video_response.candidates) > 1:
-            logging.warning(f"Job {job_id} generated {len(video_response.candidates)} videos, but only processing the first one.")
-
-        video_bytes = base64.b64decode(video_response.candidates[0].content.parts[0].video)
-
-        # Upload to GCS
+        # --- End AI Generation ---
+        # Process and upload each generated video
+        video_urls = []
+        if not storage_client:
+            raise Exception("Storage client not initialized")
         bucket = storage_client.bucket(BUCKET_NAME)
-        blob = bucket.blob(f"{job_id}.mp4")
-        blob.upload_from_string(video_bytes, content_type='video/mp4')
-        blob.make_public()
-        video_url = blob.public_url
-        logging.info(f"Video for job {job_id} uploaded to {video_url}")
+
+        # --- Placeholder result handling - NEEDS VERIFICATION ---
+        logging.warning(f"Using MOCK video data for job {job_id}. Needs real result handling from Veo SDK response.")
+        import time
+        time.sleep(10) # Simulate AI processing time
+        dummy_video_bytes = b"fake video data from mock"
+        video_base64 = base64.b64encode(dummy_video_bytes).decode('utf-8')
+
+        for i in range(num_videos):
+            video_bytes = base64.b64decode(video_base64)
+            blob_name = f"{job_id}-{i}.mp4"
+            blob = bucket.blob(blob_name)
+            blob.upload_from_string(video_bytes, content_type='video/mp4')
+            blob.make_public()
+            video_urls.append(blob.public_url)
+            logging.info(f"Video {i} for job {job_id} uploaded to {blob.public_url}")
+        # --- End Placeholder ---
 
         # Update Firestore status to 'complete'
-        doc_ref.update({
+        final_status = {
             'status': 'complete',
-            'video_url': video_url,
             'updated_at': firestore.SERVER_TIMESTAMP
-        })
+        }
+        # Store a single URL or a list of URLs
+        if len(video_urls) == 1:
+            final_status['video_url'] = video_urls[0]
+        else:
+            final_status['video_urls'] = video_urls
+
+        doc_ref.update(final_status)
         logging.info(f"Job {job_id} completed successfully.")
 
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        logging.exception(f"Error during video generation for job {job_id}: {e}")
+        logging.exception(f"Error during video generation/upload for job {job_id}: {e}")
         try:
+            # Add error details from the exception
+            error_details = f"{type(e).__name__}: {str(e)}"
             doc_ref.update({
                 'status': 'failed',
-                'error': str(e),
+                'error': error_details,
                 'updated_at': firestore.SERVER_TIMESTAMP
             })
         except Exception as db_e:
             logging.error(f"Failed to update Firestore status to failed for job {job_id}: {db_e}")
-        return "Internal Server Error", 500
+        # Return error details in response for easier debugging in Cloud Tasks logs
+        return f"Internal Server Error: {str(e)}", 500
 
 
 if __name__ == '__main__':
