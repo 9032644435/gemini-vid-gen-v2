@@ -25,7 +25,6 @@ BUCKET_NAME = os.getenv("GOOGLE_BUCKET_NAME", f"{PROJECT_ID}-video-outputs")
 VIDEO_MODEL_ID = "veo-3.1-generate-preview" # Check if REST uses full ID or just name
 
 # API Endpoint base
-# Format: https://{REGION}-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/{REGION}/publishers/google/models/{VIDEO_MODEL_ID}
 API_ENDPOINT_BASE = f"https://{REGION}-aiplatform.googleapis.com/v1"
 PREDICT_URL = f"{API_ENDPOINT_BASE}/projects/{PROJECT_ID}/locations/{REGION}/publishers/google/models/{VIDEO_MODEL_ID}:predictLongRunning"
 FETCH_OP_URL = f"{API_ENDPOINT_BASE}/projects/{PROJECT_ID}/locations/{REGION}/publishers/google/models/{VIDEO_MODEL_ID}:fetchPredictOperation"
@@ -40,7 +39,6 @@ try:
     db = firestore.Client(project=PROJECT_ID)
     tasks_client = tasks_v2.CloudTasksClient()
     storage_client = storage.Client()
-    # aiplatform.init is not strictly needed if only using REST
     logging.info("Google Cloud clients initialized.")
 except Exception as e:
     logging.critical(f"FATAL: Error initializing Google Cloud clients: {e}")
@@ -66,9 +64,10 @@ def get_cloud_run_url():
 # --- Helper for getting Auth Token ---
 def get_auth_token():
     try:
-        credentials, project_id = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
+        credentials, project_id_unused = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
         auth_req = google.auth.transport.requests.Request()
         credentials.refresh(auth_req)
+        logging.info("Successfully obtained auth token.")
         return credentials.token
     except Exception as e:
         logging.error(f"Failed to get auth token: {e}")
@@ -173,6 +172,7 @@ def check_status(job_id):
         logging.error("DB client not available.")
         return jsonify({'error': 'Server configuration error'}), 500
 
+    doc_ref = None # Initialize outside try
     try:
         doc_ref = db.collection(FIRESTORE_COLLECTION).document(job_id)
         doc = doc_ref.get()
@@ -189,97 +189,97 @@ def check_status(job_id):
             logging.info(f"Polling AI operation for job {job_id}: {operation_name}")
             token = get_auth_token()
             if not token:
-                # Keep status as processing_ai, error logged in get_auth_token
                 logging.error(f"Could not get auth token to poll operation for job {job_id}")
-                return jsonify(job_data), 200 # Return current data, don't change status
+                return jsonify(job_data), 200 # Return current data, error logged
 
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
+            headers = { "Authorization": f"Bearer {token}", "Content-Type": "application/json" }
             poll_payload = {"operationName": operation_name}
 
             try:
                 poll_response = requests.post(FETCH_OP_URL, headers=headers, json=poll_payload, timeout=10)
-                poll_response.raise_for_status() # Raise exception for bad status codes
+                logging.info(f"Poll request for {job_id} status: {poll_response.status_code}")
+                poll_response.raise_for_status()
                 op_data = poll_response.json()
 
                 if op_data.get('done'):
                     logging.info(f"AI operation DONE for job {job_id}.")
-                    # Process the result from op_data['response']
                     ai_response_data = op_data.get('response', {})
                     video_outputs = ai_response_data.get('videos', [])
                     video_urls = []
 
                     if not video_outputs:
-                         logging.error(f"AI operation done but no 'videos' field in response for job {job_id}. Response: {ai_response_data}")
-                         raise Exception("AI processing finished but returned no video outputs.")
+                         logging.error(f"AI op done but no 'videos' in response for job {job_id}. Response: {ai_response_data}")
+                         raise Exception("AI finished but returned no video outputs.")
+
+                    # Ensure storage client is available before processing URIs
+                    if not storage_client:
+                        logging.error("Storage client not available for processing GCS URIs.")
+                        raise Exception("Storage client not initialized")
 
                     for i, output in enumerate(video_outputs):
                          gcs_uri = output.get('gcsUri')
-                         if not gcs_uri:
-                             logging.warning(f"Output {i} for job {job_id} missing gcsUri. Skipping.")
+                         if not gcs_uri or not gcs_uri.startswith("gs://"):
+                             logging.warning(f"Output {i} for job {job_id} missing valid gcsUri. Skipping.")
                              continue
-                         # Convert gs:// URI to public https:// URL
-                         if gcs_uri.startswith("gs://"):
-                             try:
-                                 bucket_name_from_uri = gcs_uri.split('/')[2]
-                                 object_name = '/'.join(gcs_uri.split('/')[3:])
-                                 # We need storage client here
-                                 if not storage_client: raise Exception("Storage client not available")
-                                 bucket = storage_client.bucket(bucket_name_from_uri)
-                                 blob = bucket.blob(object_name)
-                                 if blob.exists():
-                                     # Assuming objects in the target bucket are publicly readable
-                                     public_url = blob.public_url
-                                     video_urls.append(public_url)
-                                     logging.info(f"Processed GCS URI for job {job_id}: {gcs_uri} -> {public_url}")
-                                 else:
-                                      logging.warning(f"Blob {object_name} not found for job {job_id} despite AI success.")
-                             except Exception as url_err:
-                                  logging.error(f"Error converting GCS URI {gcs_uri} to URL for job {job_id}: {url_err}")
-                         else:
-                              logging.warning(f"Output {i} for job {job_id} has unexpected URI format: {gcs_uri}")
+                         try:
+                             bucket_name_from_uri = gcs_uri.split('/')[2]
+                             object_name = '/'.join(gcs_uri.split('/')[3:])
+                             if not object_name: # Handle case where URI might just be gs://bucket/
+                                 logging.warning(f"Could not parse object name from GCS URI {gcs_uri} for job {job_id}. Skipping.")
+                                 continue
+
+                             bucket = storage_client.bucket(bucket_name_from_uri)
+                             blob = bucket.blob(object_name)
+                             # Optional: Check if blob exists before generating URL
+                             # if not blob.exists():
+                             #     logging.warning(f"Blob {object_name} not found for job {job_id}. Skipping.")
+                             #     continue
+
+                             # Generate Signed URL for secure, temporary access
+                             # expiration_time = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+                             # signed_url = blob.generate_signed_url(expiration=expiration_time)
+                             # video_urls.append(signed_url)
+                             # logging.info(f"Processed GCS URI for job {job_id}: {gcs_uri} -> Signed URL generated")
+
+                             # --- Using Public URL (Simpler, requires public objects/bucket) ---
+                             blob.make_public() # Ensure object is public
+                             public_url = blob.public_url
+                             video_urls.append(public_url)
+                             logging.info(f"Processed GCS URI for job {job_id}: {gcs_uri} -> Public URL: {public_url}")
+                             # --- End Public URL ---
+
+                         except Exception as url_err:
+                              logging.error(f"Error processing GCS URI {gcs_uri} for job {job_id}: {url_err}")
 
                     if not video_urls:
-                         raise Exception("AI processing finished but no valid video URLs could be constructed.")
+                         raise Exception("AI finished but no valid video URLs could be constructed.")
 
                     # Update Firestore to 'complete'
-                    final_status_update = {
-                        'status': 'complete',
-                        'updated_at': firestore.SERVER_TIMESTAMP
-                    }
-                    if len(video_urls) == 1:
-                        final_status_update['video_url'] = video_urls[0]
-                    else:
-                        final_status_update['video_urls'] = video_urls
+                    final_status_update = { 'status': 'complete', 'updated_at': firestore.SERVER_TIMESTAMP }
+                    if len(video_urls) == 1: final_status_update['video_url'] = video_urls[0]
+                    else: final_status_update['video_urls'] = video_urls
                     doc_ref.update(final_status_update)
                     logging.info(f"Job {job_id} successfully completed.")
-                    # Return the updated data immediately
-                    job_data.update(final_status_update)
+                    job_data.update(final_status_update) # Update local data to return
                     return jsonify(job_data), 200
                 else:
-                    # Operation still running, just return current status
                     logging.info(f"AI operation still running for job {job_id}.")
-                    return jsonify(job_data), 200
+                    return jsonify(job_data), 200 # Return current 'processing_ai' status
 
             except requests.exceptions.RequestException as poll_err:
-                 logging.error(f"Failed to poll AI operation status for job {job_id}: {poll_err}")
-                 # Optionally update status to failed here, or let it retry on next poll
-                 # doc_ref.update({'status': 'failed', 'error': 'Failed to poll AI status'})
-                 # return jsonify({'status': 'failed', 'error': 'Failed to poll AI status'}), 500
-                 return jsonify(job_data), 200 # Return current data, error logged
+                 logging.error(f"Failed to poll AI operation status for job {job_id}: {poll_err}. Response: {poll_err.response.text if poll_err.response else 'No response'}")
+                 # Keep status as processing_ai, error is logged. Will retry on next poll.
+                 return jsonify(job_data), 200
 
         else:
-            # Status is not 'processing_ai', just return current data
+            # Status is not 'processing_ai' or no operation name, just return current data
             return jsonify(job_data), 200
 
     except Exception as e:
         logging.exception(f"Error in check_status for job {job_id}: {e}")
-        # Attempt to update status to failed if possible
         try:
              if doc_ref: doc_ref.update({'status': 'failed', 'error': f'Check status failed: {str(e)}'})
-        except: pass # Ignore errors updating status during another error
+        except: pass
         return jsonify({'error': 'Failed to check job status'}), 500
 
 
@@ -321,6 +321,7 @@ def run_task():
         num_videos = int(data.get('num_videos'))
         storage_uri = data.get('storageUri') # Get GCS path from payload
         if not all([job_id, prompt, aspect_ratio, duration, num_videos, storage_uri]):
+            logging.error(f"Missing data in task payload for job {job_id or 'UNKNOWN'}: {data}")
             return "Bad Request: Missing data", 400
         doc_ref = db.collection(FIRESTORE_COLLECTION).document(job_id)
     except Exception as e:
@@ -329,6 +330,7 @@ def run_task():
 
     # --- Call AI via REST API ---
     try:
+        # Update status early to indicate work started
         doc_ref.update({'status': 'calling_ai', 'updated_at': firestore.SERVER_TIMESTAMP})
         logging.info(f"Job {job_id} status updated to calling_ai.")
 
@@ -336,10 +338,7 @@ def run_task():
         if not token:
              raise Exception("Failed to get auth token for AI call")
 
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
+        headers = { "Authorization": f"Bearer {token}", "Content-Type": "application/json" }
         # Construct payload according to REST API docs
         instances = [{"prompt": prompt}]
         parameters = {
@@ -347,38 +346,45 @@ def run_task():
             "aspectRatio": aspect_ratio,
             "sampleCount": num_videos,
             "storageUri": storage_uri # Tell API where to save output
-            # Add other params like 'generateAudio': True if needed/supported
+            # Add other params like 'generateAudio': True if needed
         }
         request_body = {"instances": instances, "parameters": parameters}
 
-        logging.info(f"Calling predictLongRunning for job {job_id}...")
-        response = requests.post(PREDICT_URL, headers=headers, json=request_body, timeout=30) # Timeout for initiating call
+        logging.info(f"Calling predictLongRunning for job {job_id} with body: {json.dumps(request_body)}") # Log request body
+        response = requests.post(PREDICT_URL, headers=headers, json=request_body, timeout=60) # Increased timeout
+        logging.info(f"predictLongRunning response status: {response.status_code} for job {job_id}")
         response.raise_for_status() # Raise exception for bad status codes
         response_data = response.json()
 
         operation_name = response_data.get('name')
         if not operation_name:
+             logging.error(f"predictLongRunning response missing 'name' for job {job_id}. Response: {response_data}")
              raise Exception("predictLongRunning response did not contain operation 'name'")
 
         logging.info(f"AI operation started for job {job_id}: {operation_name}")
 
-        # Update Firestore with operation name and new status
+        # Update Firestore with operation name and new status for polling
         doc_ref.update({
-            'status': 'processing_ai', # New status indicating polling is needed
+            'status': 'processing_ai', # Status indicates polling is needed
             'operation_name': operation_name,
             'updated_at': firestore.SERVER_TIMESTAMP
         })
+        logging.info(f"Job {job_id} status updated to processing_ai.")
 
-        return jsonify({"status": "success"}), 200 # OK to Cloud Tasks
+        # Task succeeded in *starting* the AI job
+        return jsonify({"status": "success, AI processing started"}), 200 # OK to Cloud Tasks
 
     except Exception as e:
         logging.exception(f"Error in run_task AI call/update for job {job_id}: {e}")
+        if isinstance(e, requests.exceptions.RequestException) and e.response is not None:
+             logging.error(f"AI API Response Text: {e.response.text}") # Log API error details
         if doc_ref:
              try:
                  error_details = f"{type(e).__name__}: {str(e)}"
                  doc_ref.update({'status': 'failed', 'error': error_details, 'updated_at': firestore.SERVER_TIMESTAMP})
              except Exception as db_e:
                  logging.error(f"Also failed to update Firestore after error for job {job_id}: {db_e}")
+        # Return 500 so Cloud Tasks might retry
         return f"Internal Server Error: {str(e)}", 500
 
 
