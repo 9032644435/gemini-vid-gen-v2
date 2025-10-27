@@ -213,8 +213,7 @@ def run_task():
              logging.error("Could not determine audience for OIDC validation")
              return "Configuration error: Cannot determine audience", 500
 
-        # Remove trailing slash for audience validation
-        audience = audience.rstrip('/')
+        audience = audience.rstrip('/') # Remove trailing slash if present
 
         logging.info(f"Verifying OIDC token for audience: {audience}")
         decoded_token = id_token.verify_oauth2_token(token, request_session, audience=audience)
@@ -276,22 +275,15 @@ def run_task():
             raise Exception("Storage client not initialized")
         bucket = storage_client.bucket(BUCKET_NAME)
 
-        # --- Placeholder result handling - NEEDS VERIFICATION ---
-        logging.warning(f"Using MOCK video data for job {job_id}. Needs real result handling from Veo SDK response.")
-        import time
-        time.sleep(10) # Simulate AI processing time
-        dummy_video_bytes = b"fake video data from mock"
-        video_base64 = base64.b64encode(dummy_video_bytes).decode('utf-8')
-
-        for i in range(num_videos):
-            video_bytes = base64.b64decode(video_base64)
+        # Process and upload each generated video
+        for i, part in enumerate(video_response.parts):
+            video_bytes = part.data
             blob_name = f"{job_id}-{i}.mp4"
             blob = bucket.blob(blob_name)
             blob.upload_from_string(video_bytes, content_type='video/mp4')
             blob.make_public()
             video_urls.append(blob.public_url)
             logging.info(f"Video {i} for job {job_id} uploaded to {blob.public_url}")
-        # --- End Placeholder ---
 
         # Update Firestore status to 'complete'
         final_status = {
