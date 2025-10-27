@@ -299,6 +299,7 @@ def run_task():
         audience = os.getenv('SERVICE_URL')
         if not audience: audience = get_cloud_run_url()
         if not audience: return "Config error: No audience", 500
+        #audience = audience.rstrip('/')#manualfix
         audience = audience.rstrip('/')
         logging.info(f"Verifying OIDC token for audience: {audience}")
         decoded_token = id_token.verify_oauth2_token(token, request_session, audience=audience)
