@@ -7,6 +7,7 @@ import logging
 import json
 import base64
 import time # For polling delay
+import datetime # For signed URLs
 
 # Standard imports needed for REST API calls
 from google.oauth2 import id_token
@@ -108,7 +109,7 @@ def generate_video():
         duration = data.get('duration')
         num_videos = data.get('num_videos', 1)
 
-        # Validation (keep as before)
+        # Validation
         if not prompt: return jsonify({'error': 'Missing prompt'}), 400
         if aspect_ratio not in ['16:9', '9:16']: return jsonify({'error': 'Invalid aspect_ratio'}), 400
         try:
@@ -122,13 +123,12 @@ def generate_video():
 
         job_id = str(uuid.uuid4())
         doc_ref = db.collection(FIRESTORE_COLLECTION).document(job_id)
-        # Define the GCS output path *before* creating the task
         storage_uri = f"gs://{BUCKET_NAME}/{job_id}/" # Needs trailing slash
 
         doc_ref.set({
             'prompt': prompt, 'aspect_ratio': aspect_ratio, 'duration': duration,
             'num_videos': num_videos, 'status': 'pending', 'job_id': job_id,
-            'storage_uri_requested': storage_uri, # Store for reference
+            'storage_uri_requested': storage_uri,
             'created_at': firestore.SERVER_TIMESTAMP
         })
         logging.info(f"Job {job_id} created in Firestore.")
@@ -140,19 +140,28 @@ def generate_video():
              return jsonify({'error': 'Server config error: No service URL'}), 500
 
         worker_endpoint = target_url + 'api/run-task'
-        task_payload = { # Pass only what the worker needs to *start* the AI job
+        task_payload = {
             'job_id': job_id,
             'prompt': prompt,
             'aspect_ratio': aspect_ratio,
             'duration': duration,
             'num_videos': num_videos,
-            'storageUri': storage_uri # Pass GCS URI to worker
+            'storageUri': storage_uri
         }
+
+        # --- THIS IS THE FIX ---
+        # The OIDC audience must NOT have the trailing slash.
+        oidc_audience = target_url.rstrip('/') 
+        # --- END FIX ---
+
         task = {
             'http_request': {
                 'http_method': tasks_v2.HttpMethod.POST,
                 'url': worker_endpoint,
-                'oidc_token': { 'service_account_email': TASK_SPN, 'audience': target_url },
+                'oidc_token': { 
+                    'service_account_email': TASK_SPN, 
+                    'audience': oidc_audience # Use the stripped URL
+                },
                 'headers': {'Content-type': 'application/json'},
                 'body': json.dumps(task_payload).encode('utf-8')
             }
@@ -198,7 +207,6 @@ def check_status(job_id):
         current_status = job_data.get('status')
         operation_name = job_data.get('operation_name')
 
-        # If status indicates AI processing, poll the AI operation status
         if current_status == 'processing_ai' and operation_name:
             logging.info(f"Polling AI operation for job {job_id}: {operation_name}")
             token = get_auth_token()
@@ -244,7 +252,6 @@ def check_status(job_id):
                              bucket = storage_client.bucket(bucket_name_from_uri)
                              blob = bucket.blob(object_name)
                              
-                             # Use make_public() for simple public access
                              blob.make_public() # Ensure object is public
                              public_url = blob.public_url
                              video_urls.append(public_url)
@@ -256,25 +263,22 @@ def check_status(job_id):
                     if not video_urls:
                          raise Exception("AI finished but no valid video URLs could be constructed.")
 
-                    # Update Firestore to 'complete'
                     final_status_update = { 'status': 'complete', 'updated_at': firestore.SERVER_TIMESTAMP }
                     if len(video_urls) == 1: final_status_update['video_url'] = video_urls[0]
                     else: final_status_update['video_urls'] = video_urls
                     doc_ref.update(final_status_update)
                     logging.info(f"Job {job_id} successfully completed.")
-                    job_data.update(final_status_update) # Update local data to return
+                    job_data.update(final_status_update)
                     return jsonify(job_data), 200
                 else:
-                    # Operation still running
                     logging.info(f"AI operation still running for job {job_id}.")
-                    return jsonify(job_data), 200 # Return current 'processing_ai' status
+                    return jsonify(job_data), 200
 
             except requests.exceptions.RequestException as poll_err:
                  logging.error(f"Failed to poll AI operation status for job {job_id}: {poll_err}. Response: {poll_err.response.text if poll_err.response else 'No response'}")
-                 return jsonify(job_data), 200 # Return current status, will retry poll
+                 return jsonify(job_data), 200
 
         else:
-            # Status is 'pending', 'complete', or 'failed', just return current data
             return jsonify(job_data), 200
 
     except Exception as e:
@@ -323,7 +327,7 @@ def run_task():
         aspect_ratio = data.get('aspect_ratio')
         duration = int(data.get('duration'))
         num_videos = int(data.get('num_videos'))
-        storage_uri = data.get('storageUri') # Get GCS path from payload
+        storage_uri = data.get('storageUri')
         if not all([job_id, prompt, aspect_ratio, duration, num_videos, storage_uri]):
             logging.error(f"Missing data in task payload for job {job_id or 'UNKNOWN'}: {data}")
             return "Bad Request: Missing data", 400
@@ -365,7 +369,6 @@ def run_task():
 
         logging.info(f"AI operation started for job {job_id}: {operation_name}")
 
-        # Update Firestore with operation name and new status for polling
         doc_ref.update({
             'status': 'processing_ai', # Status indicates polling is needed
             'operation_name': operation_name,
@@ -391,5 +394,4 @@ def run_task():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() in ['true', '1', 'yes']
-    # FIX: Removed duplicate 'debug=' keyword
     app.run(debug=debug_mode, host='0.0.0.0', port=port)
