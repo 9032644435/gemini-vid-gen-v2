@@ -7,3 +7,4 @@ requests>=2.32.0
 python-dotenv
 gunicorn==22.0.0
 google-auth>=2.29.0
+flask-cors==4.0.0
