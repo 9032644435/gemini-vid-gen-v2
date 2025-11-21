@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Viral Video Remixer</title>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+    <style>
+        body { background-color: #0d0d0d; color: #00ffcc; font-family: 'Courier New', monospace; padding: 40px; }
+        .container { max-width: 900px; margin: 0 auto; border: 1px solid #333; padding: 20px; box-shadow: 0 0 20px rgba(0, 255, 204, 0.1); }
+        h1 { text-align: center; text-shadow: 0 0 10px #00ffcc; margin-bottom: 40px; }
+        
+        .drop-zone { 
+            border: 2px dashed #00ffcc; 
+            padding: 60px; 
+            text-align: center; 
+            cursor: pointer; 
+            margin-bottom: 30px; 
+            transition: all 0.3s;
+            background: rgba(0, 255, 204, 0.05);
+        }
+        .drop-zone:hover { background: rgba(0, 255, 204, 0.1); }
+        
+        label { display: block; margin-bottom: 10px; font-weight: bold; color: #fff; }
+        textarea { 
+            width: 100%; 
+            background: #1a1a1a; 
+            color: #00ffcc; 
+            border: 1px solid #333; 
+            padding: 15px; 
+            margin-bottom: 20px; 
+            font-family: inherit;
+            box-sizing: border-box;
+        }
+        
+        button { 
+            background: #00ffcc; 
+            color: black; 
+            border: none; 
+            padding: 15px 30px; 
+            font-weight: bold; 
+            cursor: pointer; 
+            width: 100%; 
+            font-size: 18px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            transition: 0.2s;
+        }
+        button:hover { background: #00ccaa; box-shadow: 0 0 15px #00ffcc; }
+        
+        #preview-container { display: none; margin-bottom: 30px; text-align: center; }
+        img { max-width: 100%; border: 1px solid #00ffcc; max-height: 400px; }
+        
+        #status-area { margin-top: 30px; text-align: center; font-size: 18px; }
+        .loader { animation: blink 1s infinite; }
+        @keyframes blink { 50% { opacity: 0; } }
+        a { color: #fff; text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>VIRAL VIDEO REMIXER // VEO</h1>
+        
+        <div class="drop-zone" id="drop-zone">
+            <p>[ DRAG & DROP VIDEO FILE HERE ]</p>
+            <input type="file" id="file-input" accept="video/*" style="display: none;">
+        </div>
+
+        <div id="preview-container">
+            <p>> ANALYZING FRAME...</p>
+            <canvas id="video-canvas" style="display:none;"></canvas>
+            <img id="frame-preview" src="" alt="Frame Preview">
+        </div>
+
+        <label>> ORIGINAL CONTEXT (AI VISION):</label>
+        <textarea id="original-context" rows="3" readonly>Waiting for upload...</textarea>
+
+        <label>> REMIX INSTRUCTION:</label>
+        <textarea id="remix-instruction" rows="2" placeholder="e.g. Make it Indian style, change cat to tiger, cinematic lighting..."></textarea>
+
+        <button id="remix-btn">INITIATE REMIX SEQUENCE</button>
+
+        <div id="status-area"></div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        
+        dropZone.onclick = () => fileInput.click();
+        
+        dropZone.ondragover = (e) => { e.preventDefault(); dropZone.style.background = 'rgba(0, 255, 204, 0.2)'; };
+        dropZone.ondragleave = () => { dropZone.style.background = 'rgba(0, 255, 204, 0.05)'; };
+        dropZone.ondrop = (e) => {
+            e.preventDefault();
+            dropZone.style.background = 'rgba(0, 255, 204, 0.05)';
+            if (e.dataTransfer.files[0]) processVideo(e.dataTransfer.files[0]);
+        };
+
+        fileInput.onchange = (e) => {
+            if (e.target.files[0]) processVideo(e.target.files[0]);
+        };
+
+        function processVideo(file) {
+            $('#status-area').html(">> EXTRACTING FRAME DATA...");
+            const video = document.createElement('video');
+            video.src = URL.createObjectURL(file);
+            video.currentTime = 1; 
+            
+            video.onloadeddata = () => {
+                setTimeout(() => {
+                    const canvas = document.getElementById('video-canvas');
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    
+                    const dataUrl = canvas.toDataURL('image/jpeg');
+                    document.getElementById('frame-preview').src = dataUrl;
+                    document.getElementById('preview-container').style.display = 'block';
+                    document.getElementById('drop-zone').style.display = 'none';
+                    
+                    analyzeFrame(dataUrl);
+                }, 500);
+            };
+        }
+
+        function analyzeFrame(base64Image) {
+            $('#original-context').val(">> CONTACTING GEMINI VISION...");
+            
+            $.ajax({
+                type: 'POST',
+                url: '/api/describe-image',
+                data: JSON.stringify({ image: base64Image }),
+                contentType: 'application/json',
+                success: function(data) {
+                    $('#original-context').val(data.description);
+                    $('#status-area').html(">> ANALYSIS COMPLETE. READY FOR REMIX.");
+                },
+                error: function(err) {
+                    $('#original-context').val("ERROR: VISION ANALYSIS FAILED.");
+                    console.error(err);
+                }
+            });
+        }
+
+        $('#remix-btn').click(function() {
+            const context = $('#original-context').val();
+            const instruction = $('#remix-instruction').val();
+            
+            if(!instruction) { alert("ENTER INSTRUCTION"); return; }
+
+            const combinedPrompt = context + ". " + instruction;
+            
+            $('#status-area').html("<span class='loader'>>> TRANSMITTING TO VEO...</span>");
+
+            $.ajax({
+                type: 'POST',
+                url: '/api/generate-video',
+                data: JSON.stringify({
+                    prompt: combinedPrompt,
+                    aspect_ratio: '16:9',
+                    duration: 8,
+                    num_videos: 1
+                }),
+                contentType: 'application/json',
+                success: function(data) {
+                    pollStatus(data.job_id);
+                },
+                error: function(err) {
+                    $('#status-area').html(">> SYSTEM ERROR: GENERATION FAILED.");
+                }
+            });
+        });
+
+        function pollStatus(jobId) {
+            let dots = 0;
+            const interval = setInterval(() => {
+                dots = (dots + 1) % 4;
+                const loadingText = ">> GENERATING VIDEO" + ".".repeat(dots);
+                
+                $.get('/api/check-status/' + jobId, function(data) {
+                    if (data.status === 'complete') {
+                        clearInterval(interval);
+                        $('#status-area').html(`<br><a href="${data.video_url}" target="_blank" style="font-size: 24px; border: 2px solid #fff; padding: 10px;">[ DOWNLOAD VIDEO ARTIFACT ]</a>`);
+                    } else if (data.status === 'failed') {
+                        clearInterval(interval);
+                        $('#status-area').html(`<span style="color:red">>> FAILURE: ${data.error}</span>`);
+                    } else {
+                        $('#status-area').html(loadingText + `<br><small>Status: ${data.status}</small>`);
+                    }
+                });
+            }, 5000);
+        }
+    </script>
+</body>
+</html>
+eof
