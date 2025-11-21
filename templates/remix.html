@@ -115,17 +115,20 @@
                     const ctx = canvas.getContext('2d');
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                     
+                    // Determine aspect ratio for backend payload
+                    const aspectRatio = canvas.width > canvas.height ? '16:9' : '9:16';
+
                     const dataUrl = canvas.toDataURL('image/jpeg');
                     document.getElementById('frame-preview').src = dataUrl;
                     document.getElementById('preview-container').style.display = 'block';
                     document.getElementById('drop-zone').style.display = 'none';
                     
-                    analyzeFrame(dataUrl);
+                    analyzeFrame(dataUrl, aspectRatio);
                 }, 500);
             };
         }
 
-        function analyzeFrame(base64Image) {
+        function analyzeFrame(base64Image, aspectRatio) {
             $('#original-context').val(">> CONTACTING GEMINI VISION...");
             
             $.ajax({
@@ -136,9 +139,11 @@
                 success: function(data) {
                     $('#original-context').val(data.description);
                     $('#status-area').html(">> ANALYSIS COMPLETE. READY FOR REMIX.");
+                    $('#remix-btn').data('aspectRatio', aspectRatio); // Store aspect ratio in button for push
                 },
                 error: function(err) {
                     $('#original-context').val("ERROR: VISION ANALYSIS FAILED.");
+                    $('#status-area').html(">> SYSTEM ERROR: VISION ANALYSIS FAILED.");
                     console.error(err);
                 }
             });
@@ -147,19 +152,22 @@
         $('#remix-btn').click(function() {
             const context = $('#original-context').val();
             const instruction = $('#remix-instruction').val();
-            
+            const aspectRatio = $(this).data('aspectRatio') || '16:9'; // Default to 16:9
+
             if(!instruction) { alert("ENTER INSTRUCTION"); return; }
+            if(context.startsWith('ERROR')) { alert("VISION FAILED. Please try again or use a simpler video."); return; }
 
             const combinedPrompt = context + ". " + instruction;
             
             $('#status-area').html("<span class='loader'>>> TRANSMITTING TO VEO...</span>");
 
+            // Call your existing Generation Endpoint, passing aspect ratio
             $.ajax({
                 type: 'POST',
                 url: '/api/generate-video',
                 data: JSON.stringify({
                     prompt: combinedPrompt,
-                    aspect_ratio: '16:9',
+                    aspect_ratio: aspectRatio, // Use aspect ratio detected from video
                     duration: 8,
                     num_videos: 1
                 }),
@@ -195,4 +203,3 @@
     </script>
 </body>
 </html>
-eof
