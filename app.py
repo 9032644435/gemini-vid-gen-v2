@@ -74,7 +74,7 @@ def describe_image():
         data = request.get_json()
         image_data = data.get('image')
         if ',' in image_data: image_data = image_data.split(',')[1]
-        model = GenerativeModel("gemini-1.5-flash-001")
+        model = GenerativeModel("gemini-1.5-flash")
         image_part = Part.from_data(mime_type="image/jpeg", data=base64.b64decode(image_data))
         prompt = "Describe this image in extreme detail for a video generation prompt. Focus on lighting, style, characters, and setting. Keep it under 100 words."
         response = model.generate_content([prompt, image_part])
