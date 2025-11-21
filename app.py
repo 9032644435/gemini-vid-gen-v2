@@ -35,7 +35,6 @@ db = None
 tasks_client = None
 storage_client = None
 
-# Force Update Comment
 try:
     db = firestore.Client(project=PROJECT_ID)
     tasks_client = tasks_v2.CloudTasksClient()
@@ -74,7 +73,7 @@ def describe_image():
         data = request.get_json()
         image_data = data.get('image')
         if ',' in image_data: image_data = image_data.split(',')[1]
-        model = GenerativeModel("gemini-1.5-flash")
+        model = GenerativeModel("gemini-1.5-flash") # The fix for stability
         image_part = Part.from_data(mime_type="image/jpeg", data=base64.b64decode(image_data))
         prompt = "Describe this image in extreme detail for a video generation prompt. Focus on lighting, style, characters, and setting. Keep it under 100 words."
         response = model.generate_content([prompt, image_part])
@@ -101,8 +100,12 @@ def generate_video():
 
         worker_endpoint = target_url + 'api/run-task'
         task_payload = {
-            'job_id': job_id, 'prompt': prompt, 'aspect_ratio': '16:9',
-            'duration': 8, 'num_videos': 1, 'storageUri': storage_uri
+            'job_id': job_id, 
+            'prompt': prompt, 
+            'aspect_ratio': data.get('aspect_ratio', '16:9'), # Retrieve user value
+            'duration': data.get('duration', 8), # Retrieve user value
+            'num_videos': data.get('num_videos', 1),
+            'storageUri': storage_uri
         }
         
         task = {
@@ -163,15 +166,27 @@ def run_task():
         
         token = get_auth_token()
         headers = { "Authorization": f"Bearer {token}", "Content-Type": "application/json" }
-        body = {
+        
+        # Use task payload variables here: Aspect Ratio/Duration are now passed correctly
+        request_body = {
             "instances": [{"prompt": data.get('prompt')}],
-            "parameters": {"durationSeconds": 8, "aspectRatio": "16:9", "sampleCount": 1, "storageUri": data.get('storageUri'), "generateAudio": True}
+            "parameters": {
+                "durationSeconds": data.get('duration'),
+                "aspectRatio": data.get('aspect_ratio'),
+                "sampleCount": data.get('num_videos'),
+                "storageUri": data.get('storageUri'),
+                "generateAudio": True
+            }
         }
-        response = requests.post(PREDICT_URL, headers=headers, json=body).json()
-        db.collection(FIRESTORE_COLLECTION).document(job_id).update({'status': 'processing_ai', 'operation_name': response.get('name')})
+        
+        response = requests.post(PREDICT_URL, headers=headers, json=request_body, timeout=60)
+        response.raise_for_status()
+        operation_name = response.json().get('name')
+        
+        db.collection(FIRESTORE_COLLECTION).document(job_id).update({'status': 'processing_ai', 'operation_name': operation_name})
         return jsonify({"status": "success"}), 200
     except Exception as e: return f"Error: {str(e)}", 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-
+    
